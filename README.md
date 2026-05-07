@@ -1,5 +1,3 @@
-# compliance_automation
-End-to-end compliance audit automation pipeline for pest control account management. 
 # Compliance Automation Pipeline
 
 An automation pipeline that scrapes a web portal, evaluates 
@@ -68,18 +66,18 @@ Each location is evaluated for five document types:
 
 ## Project Structure
 
-compliance_automation/
-├── scripts/
-│   ├── evaluate_compliance.py
-│   ├── write_to_excel.py
-│   ├── move_map.py
-│   └── get_drop_number.py
-└── docs/
-├── project_overview.md
-├── data_flow.md
-├── pepsi_flow.md
-├── frito_flow.md
-└── excel_structure.md
+**scripts/**
+- `evaluate_compliance.py` — evaluates compliance rules and flags issues
+- `write_to_excel.py` — writes evaluated data to the Excel workbook
+- `move_map.py` — moves downloaded map PDFs to the correct folder
+- `get_drop_number.py` — identifies the correct dropdown for multi-location addresses
+
+**docs/**
+- `project_overview.md` — plain English explanation of the full project
+- `data_flow.md` — how data moves from portal to final report
+- `pepsi_flow.md` — step by step documentation of the Pepsi automation flow
+- `frito_flow.md` — step by step documentation of the Frito-Lay automation flow
+- `excel_structure.md` — what every tab and column in the workbook means
 
 ---
 
