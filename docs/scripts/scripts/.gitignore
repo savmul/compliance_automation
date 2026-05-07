@@ -1,0 +1,19 @@
+# Data files - never upload these
+*.xlsx
+*.xls
+*.csv
+*.pdf
+*.zip
+
+# Temp files from the automation
+temp_address.txt
+temp_docs.json
+temp_mapaddress.txt
+temp_dropnumber.txt
+
+# Maps folder
+Maps/
+
+# System files
+.DS_Store
+Thumbs.db
