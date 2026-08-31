@@ -1,264 +1,219 @@
 # Excel Structure
 
+What every tab and column in both workbooks means.
+
+> Client and employer names are genericized throughout.
+
 ## Overview
 
-Two Excel files power this pipeline.
-They are linked by ADDRESS — Python 
-normalizes addresses from both files 
-before joining them.
+Two workbooks power the pipeline. They are linked by address — Python normalizes addresses from both before joining.
 
 | File | Purpose |
 |---|---|
-| Insite_Compliance_Model.xlsx | Compliance brain — documents, results, location lists |
-| Service_Ticket_Report.xlsx | Work order master — raw service data |
+| `Compliance_Model.xlsx` | Compliance brain — location lists, scraped documents, results |
+| `Service_Ticket_Report.xlsx` | Work-order master — contract scope, work orders, equipment verdicts |
 
-All files stored at C:\Automation\
-Never move to a cloud-synced folder.
-
----
-
-## Insite_Compliance_Model.xlsx
-
-### Tab Types
-
-There are three categories of tabs:
-
-| Type | Description |
-|---|---|
-| Reference tabs | Static lookup data — do not edit manually |
-| Staging tabs | Replaced or updated each month |
-| Output tab | Written by Python — compliance results |
+Both live on a local path, never in a cloud-synced folder.
 
 ---
 
-### Reference Tabs
+# Compliance_Model.xlsx
 
-**Client_A_Locations**
-~131 addresses for Client A.
+Tabs fall into three categories: **reference** (static lookups), **staging** (refreshed each run), and **output** (written by Python).
+
+## Reference tabs
+
+### `Client_A_Locations` / `Client_B_Locations`
+
+~131 and ~188 addresses respectively. Same structure.
 
 | Column | Content |
 |---|---|
 | A | Address |
-| C | Company |
+| C | Company / location type |
 | D | Branch number |
 | E | State |
-| F | Franchise flag |
+| F | Franchise flag (YES/NO) |
 
-**Client_B_Locations**
-~188 addresses for Client B.
-Same column structure as Client_A_Locations.
+A branch number starting with `9` is also treated as a franchise, regardless of the flag.
 
-**Client_A_MultiDrop**
-Addresses that return multiple dropdown 
-options when searched in the portal.
+### `Client_A_MultiDrop` / `Client_B_MultiDrop`
+
+Addresses that return multiple results when searched in the portal.
 
 | Column | Content |
 |---|---|
 | A | Address |
 | B | Dropdown number to select (2 or 3) |
 
-**Client_B_MultiDrop**
-Client B equivalent of Client_A_MultiDrop.
+A value of 2 or 3 means the correct result is not the first one, so the scrape cannot be trusted. Those locations are marked `MANUAL_REVIEW`. Drop 1 or blank is an ordinary location.
 
-**State_Exceptions**
-States where individual technician 
-licenses are not required.
-Python reads this tab to assign 
-EXEMPT status to affected locations.
+### `State_Exceptions`
 
----
-
-### Staging Tabs
-
-**Raw_Document_Pull**
-All documents scraped by Power Automate 
-land here. One row per document 
-per location.
-
-Cleared before each full flow run to 
-prevent old data mixing with new.
-
-Key columns:
+States where individual technician licenses are not required. Python assigns `EXEMPT` to the tech license check for locations in those states.
 
 | Column | Content |
 |---|---|
-| address | Service location address |
-| pull_date | Date this row was scraped |
-| tech_name | Employee name (or inspection date for qa_manual rows) |
-| doc_area | Which table section the doc came from |
-| doc_title | Full document name as it appears in portal |
-| doc_type | Certificate / License / Miscellaneous |
-| expiry_date | Expiration date if present |
-| exp_status | VALID / EXPIRED / EXPIRING_SOON / NO_EXP_REQUIRED |
-| name_match | PENDING until evaluate_compliance.py runs |
+| A | Two-letter state code |
+| B | Required? YES / NO |
 
-> Note: For qa_manual rows the inspection 
-> date is stored in the tech_name column 
-> by design. evaluate_compliance.py 
-> handles these rows differently.
+### `Doc_Rules`
 
-**Last_WO_Tech**
-Most recent work order and technician 
-name per address. ~319 rows.
-Replaced each month.
-Python reads this to know whose 
-documents to check for tech-level 
-compliance checks.
+Document classification rules. Informational — the live rules are in `evaluate_compliance.py`.
 
-| Column | Content |
-|---|---|
-| address | Service location address |
-| last_wo_date | Date of most recent work order |
-| tech_name | Technician who performed the work |
+## Staging tabs
 
-**Map_Manual_Data**
-Manually verified map device counts 
-per location.
-The map_found column is auto-updated 
-by Python each run.
-Count columns are never overwritten 
-by Python — only updated manually.
+### `Raw_Document_Pull`
 
-| Column | Updated By |
-|---|---|
-| address | Python — auto-populated |
-| map_found | Python — YES / NO / MISSING |
-| map_erb | Manual — verified ERB count |
-| map_irt | Manual — verified IRT count |
-| map_ifl | Manual — verified IFL count |
-| map_dated | Manual — is the map dated? |
-| map_signed | Manual — is the map signed? |
-| map_status | Manual — overall status |
-| last_verified | Manual — date last checked |
-| map_flags | Manual — notes and issues |
+Every document scraped by Power Automate. One row per document per location per pull date.
 
----
-
-### Output Tab
-
-**Compliance_Eval**
-One row per location per month.
-Written by evaluate_compliance.py.
-Currently wipes and rewrites on 
-every run — will switch to append 
-mode before go-live.
-
-Key columns:
-
-| Column | Content |
-|---|---|
-| audit_month | Month being evaluated |
-| address | Service location address |
-| branch | Branch number |
-| state | State code |
-| company | Client and location type |
-| tech_name | Technician from Last_WO_Tech |
-| PC_license_branch | PASS / MISSING / EXPIRED / MANUAL_REVIEW |
-| PC_license_tech | PASS / MISSING / EXPIRED / EXEMPT / MANUAL_REVIEW |
-| COI | PASS / MISSING / EXPIRED / WRONG_YEAR / MANUAL_REVIEW |
-| pepsi_cert | PASS / MISSING |
-| IPM_cert | PASS / MISSING / EXPIRED / WRONG_YEAR / MANUAL_REVIEW |
-| annual_report | PASS / MISSING / MANUAL_REVIEW |
-| quarterly_trend | PASS / MISSING / EXEMPT / MANUAL_REVIEW |
-| pesticide_log | PASS / MISSING / EXEMPT / MANUAL_REVIEW |
-| equipment_match | MATCH / MISMATCH / NO_DATA |
-| map_found | YES / NO / MISSING |
-| map_erb | Verified ERB count from map |
-| map_irt | Verified IRT count from map |
-| map_ifl | Verified IFL count from map |
-| map_signed | YES / NO |
-| map_dated | YES / NO |
-| checks_applicable | Number of checks that apply |
-| checks_passed | Number of checks that passed |
-| compliance_pct | checks_passed ÷ checks_applicable |
-| flags | Pipe-separated list of failed checks |
-| last_checked | Timestamp of last evaluation run |
-
----
-
-## Service_Ticket_Report.xlsx
-
-### Physical Tabs
-
-**page**
-Raw work order data. All cleaned monthly 
-rows paste here.
-
-> CRITICAL RULES FOR THIS TAB:
-> - Never rename this tab — Power Query 
->   is hardcoded to this name
-> - Never paste the header row
-> - Always paste values only — 
->   never with formatting
-> - Never edit Power Query unless 
->   intentionally rebuilding
-
-Column order — 9 columns in exact order:
-
-| Column | Name | Notes |
+| Col | Field | Content |
 |---|---|---|
-| A | WORK ORDER | Unique ticket number |
-| B | COMPANY | Client and location type |
-| C | ADDRESS | Service location address |
-| D | TECHNICIAN | Tech who performed service |
-| E | SERVICE TYPE | e.g. PC Standard - Monthly |
-| F | DATETIME | Timestamp of service |
-| G | ZONE NAME | Zone where equipment is located |
-| H | TRAP TYPE | Standardized to 3 values only |
-| I | STATION FINDING | Observation Recorded / Pesticide Usage / Pest Finding / blank |
+| A | address | Service location address |
+| B | doc_area | Which table section the document came from |
+| C | tech_name | Employee name — or, for QA rows, the inspection date |
+| D | doc_title | Document name exactly as it appears in the portal |
+| E | exp_date | Expiration date if present |
+| F | pull_date | Date this row was scraped |
+| G | exp_status | VALID / EXPIRED / EXPIRING_SOON / NO_EXP_REQUIRED |
+| H | name_match | `PENDING` until `evaluate_compliance.py` runs |
+| I | location_specific | Whether the document is specific to this location |
 
-**Location_Master**
-Branch, address, and company lookup.
-Used by Power Query to merge branch 
-numbers into Location_Month_Summary.
-Do not edit manually.
+Two behaviors worth knowing:
+
+- **Inspection dates are stored in `tech_name` for QA rows.** This is deliberate — QA rows have no employee, and `evaluate_compliance.py` reads that column differently based on `doc_area`.
+- **History is preserved.** Re-running an address on the same day replaces that day's rows; previous days stay. `evaluate_compliance.py` filters to the most recent pull per address, so old rows never affect a verdict.
+
+### `Map_Manual_Data`
+
+Manually verified map device counts. **Python only ever writes columns A and B.** Everything else is yours and is never overwritten.
+
+| Column | Updated by | Content |
+|---|---|---|
+| address | Python | Auto-populated for new locations |
+| map_found | Python | YES / NO |
+| map_erb | Manual | Verified exterior bait station count |
+| map_irt | Manual | Verified interior rodent trap count |
+| map_ifl | Manual | Verified fly light count |
+| map_dated | Manual | Is the map dated? YES / NO |
+| map_signed | Manual | Is the map signed? YES / NO |
+| map_status | Manual | Overall status |
+| last_verified | Manual | Date last checked |
+| map_flags | Manual | Notes and issues |
+
+## Output tab
+
+### `Compliance_Eval`
+
+One row per location per month. 25 columns.
+
+| Col | Field | Content |
+|---|---|---|
+| A | audit_month | e.g. `August 2026` — set by `AUDIT_MONTH` in the script |
+| B | address | Display format |
+| C | branch | Branch number |
+| D | state | Two-letter code |
+| E | company | Client and location type |
+| F | tech_name | Earliest non-zero work-order tech for this address and month |
+| G | PC_license_branch | PASS / EXPIRED / MISSING / MANUAL_REVIEW |
+| H | PC_license_tech | PASS / EXPIRED / MISSING / EXEMPT / MANUAL_REVIEW |
+| I | client_cert | PASS / MISSING / MANUAL_REVIEW |
+| J | IPM_cert | PASS / EXPIRED / MISSING / WRONG_YEAR / MANUAL_REVIEW |
+| K | COI | PASS / EXPIRED / MISSING / WRONG_YEAR / MANUAL_REVIEW |
+| L | annual_report | PASS / MISSING / MANUAL_REVIEW |
+| M | quarterly_trend | PASS / MISSING / EXEMPT / MANUAL_REVIEW |
+| N | pesticide_log | PASS / MISSING / EXEMPT / MANUAL_REVIEW |
+| O | equipment_match | From `Equipment_Compliance` — PASS / UNDER / OVER / CANCELLED / CHECK / NO_DATA |
+| P | map_found | YES / NO |
+| Q | map_erb | Verified count from the map |
+| R | map_irt | Verified count from the map |
+| S | map_ifl | Verified count from the map |
+| T | map_dated | YES / NO |
+| U | map_signed | YES / NO |
+| V | map_vs_sow | MATCH / MISMATCH / NO_MAP / NO_SOW / NO_MAP_COUNTS / MANUAL_REVIEW |
+| W | map_mismatch_detail | e.g. `ERB: Map=34 SOW=32` — blank when MATCH |
+| X | flags | All issues combined into one column for filtering |
+| Y | last_checked | Date the script wrote this row |
+
+**Write behavior.** Rows are keyed on `(address, audit_month)`. A matching row is overwritten; a new one is appended. Duplication can be allowed deliberately as a reference when the portal is suspected of glitching, so two pulls can be compared side by side.
+
+> A compliance percentage is calculated during the run and printed to the console, but is **not** written as a column. If a percentage is needed in reporting, it can be computed downstream from the eight check columns — count `PASS` divided by count of non-`EXEMPT`.
 
 ---
 
-### Power Query Tabs
+# Service_Ticket_Report.xlsx
 
-Run automatically on Refresh All.
-Do not edit unless intentionally rebuilding.
+Four tabs.
 
-| Query | What It Does |
+### `SOW_Lookup` — built by `read_sow_v2.py`
+
+One row per location: contracted scope. Wiped and replaced on each run of that script.
+
+| Col | Field |
 |---|---|
-| tbl_Raw | Reads page tab, adds calculated columns including ScanCount and equipment flags |
-| WO_Summary | Groups by work order, sums ERB/IRT/IFL counts and zone observations |
-| Location_Month_Summary | Groups to location level, merges with Location_Master for branch data |
-| tbl_Location_Master | Reads Location_Master tab as clean lookup |
+| A | Address |
+| B–E | ERB: device count, frequency, visits per month, expected monthly scans |
+| F–I | IRT: same four fields |
+| J–M | IFL: same four fields |
+| N | Flags — includes the `CANCELLED` marker |
 
-> The tab Python reads must be named 
-> exactly Location_Month_Summary — 
-> no variation. Python will error 
-> if the name does not match.
+Frequency translates to visits per month as: monthly = 1, semi-monthly / every other week = 2, weekly = 4. Expected scans = device count × visits per month.
+
+### `WO_Counts_Detail` — built by `parse_service_detail.py`
+
+One row per unique work order. Wiped and replaced each run.
+
+| Col | Field |
+|---|---|
+| A | WORK ORDER |
+| B | ADDRESS (cleaned) |
+| C | RAW_ADDRESS (as it appeared in the export) |
+| D | TECHNICIAN |
+| E | BRANCH |
+| F | COMPLETED |
+| G | MONTH — e.g. `Aug 2026` |
+| H | CLIENT |
+| I | ACTIVITY |
+| J–L | ERB / IRT / IFL scan counts |
+| M | REVIEW_FLAGS |
+
+`REVIEW_FLAGS` carries anything the parser could not resolve confidently — an ambiguous zone, an unrecognized device type, or a new address with no contract row yet.
+
+### `Equipment_Compliance` — built by `compare_equipment.py`
+
+One row per location per month. Wiped and replaced each run. 24 columns.
+
+Identity: `ADDRESS`, `CLIENT`, `MONTH`, `MATCH_TYPE` (exact / fuzzy / none).
+
+Then six columns for each of the three device types:
+
+| Suffix | Meaning |
+|---|---|
+| `_DEVICES` | Devices on site, from the contract |
+| `_FREQUENCY` | How often each should be serviced |
+| `_EXPECTED_SCANS` | Devices × visits per month |
+| `_TOTAL_SCANS` | Actual scans summed across the month's work orders |
+| `_EFFECTIVE_VISITS` | Total scans ÷ devices — average visits per device |
+| `_VERDICT` | PASS / UNDER / OVER / CANCELLED / EXTRA DEVICE / NO SOW / N/A |
+
+Then `OVERALL_VERDICT` and `FLAGS`.
+
+`_EFFECTIVE_VISITS` is the column a branch manager actually reads — it converts an abstract scan count into "your tech visited each device about 3 times this month when the contract says 2."
+
+**Verdict thresholds:** within 95–110% of expected is `PASS`; below 95% is `UNDER (n short)`; above 110% is `OVER (~Nx, expected Mx)`.
+
+Locations in `SOW_Lookup` with no work orders at all get a row marked `NO WORK ORDERS — verify (cancelled?)`, so a site that quietly stopped being serviced cannot disappear from the report.
+
+### `Location_Master`
+
+Address → branch and company lookup. Static reference.
 
 ---
 
-## Trap Type Standardization
+## Critical rules
 
-Column H in the page tab must contain 
-exactly one of these three values.
-Standardize using Find and Replace 
-before pasting each month.
-
-| Standard Value | What It Represents |
-|---|---|
-| Ext Rodent Bait Station | Exterior rodent bait stations |
-| Tin Cat Trap | Interior rodent traps |
-| Fly Light | Insect and fly light traps |
-
----
-
-## Equipment Count Logic
-
-| Finding Value | Counts As |
-|---|---|
-| Observation Recorded | 1 scanned device |
-| Pesticide Usage | 0 — does not count as scan |
-| Pest Finding | 0 — does not count as scan |
-| blank | 0 — equipment not scanned |
-
-If a device has both Observation Recorded 
-and Pesticide Usage in the same work order, 
-Power Query deduplicates automatically — 
-it counts as 1 scan, not 2.
+- Close Excel completely before running any Python script — `openpyxl` cannot write to an open file
+- Set `AUDIT_MONTH` in `evaluate_compliance.py` before every run
+- Map count columns in `Map_Manual_Data` are manual — Python never overwrites them
+- `SOW_Lookup`, `WO_Counts_Detail`, and `Equipment_Compliance` are all wiped and rebuilt by their scripts. Do not hand-edit them
+- Never move either workbook into a cloud-synced folder
