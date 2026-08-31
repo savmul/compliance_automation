@@ -83,6 +83,12 @@ Only Stream 2 depends on the portal's user interface. That separation is deliber
 
 `Compliance_Eval` appends rather than overwrites, so the output tab accumulates one row per location per month. Power BI reads that history and turns it into something branch managers actually receive — their own locations, their own open items, and what specifically is wrong with each — replacing the individual emails the manual process depended on. Regional and division-level views are provided as the account requires.
 
+The model is a star schema: `Dim_Month`, `Dim_Address`, and `Dim_DeviceType` over four fact tables — document compliance, work-order counts, map verification, and equipment compliance. Two report pages, By Branch and By Address, sliced by month, branch, and address.
+
+The design principle is that **every status is paired with the action that clears it.** A missing document appears as `Upload: Certificate of Insurance`, not as `MISSING`. An equipment shortfall reads `ERB: 5 of 6 scans (83% of monthly target)`, not `UNDER`. The audit already knew all of it; the reporting layer states it as an instruction rather than a verdict, because the reader is a branch manager deciding what to do, not an auditor.
+
+Both compliance percentages — documents and equipment — are DAX measures rather than stored columns, so each definition lives in one place and can be corrected without re-running the pipeline or rebuilding history.
+
 Access is currently handled by distributing separate reports rather than by a row-level security rule in the model. Row-level security is the correct fix and the natural next step; distribution works, but it scales with the number of branches instead of staying constant.
 
 ## Verdict meanings
