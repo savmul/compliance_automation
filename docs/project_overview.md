@@ -1,65 +1,50 @@
 # Project Overview
 
+Plain-English explanation of what this system is and why it is built the way it is.
+
+> Client and employer names are genericized throughout. "Client A" and "Client B" are two national food & beverage accounts. "The portal" is a proprietary service-management platform.
+
 ## Summary
 
-An end-to-end compliance automation pipeline built 
-to replace a fully manual monthly audit process 
-across ~319 service locations for two corporate 
-accounts.
+An end-to-end compliance automation pipeline replacing a fully manual monthly audit across 319 service locations for two corporate accounts.
 
-A Power Automate Desktop robot scrapes a customer 
-portal nightly, Python evaluates compliance against 
-8 checks per location, and results are written to 
-Excel for review and reporting.
+A Power Automate Desktop robot scrapes the customer portal location by location. Python then reconciles three independent data sources, evaluates 8 document checks plus equipment and map comparisons per location, and writes structured verdicts to Excel.
 
----
+## The problem
 
-## The Problem
+Each location must maintain current compliance documentation at all times:
 
-Each service location must maintain active 
-compliance documents at all times:
+1. Branch pest control business license
+2. Certificate of Insurance (COI)
+3. Technician pesticide license
+4. Technician client certification
+5. IPM / cGMP certification
+6. Annual facility assessment
+7. Quarterly pest trend report
+8. Quarterly pesticide usage log
 
-- Branch pest control business license
-- Certificate of Insurance (COI)
-- Technician pesticide license
-- Technician client certification
-- IPM / cGMP certification
-- Annual facility assessment
-- Quarterly pest trend report
-- Quarterly pesticide usage log
+At 319 locations that is 2,552 document verifications per month, done by hand.
 
-With ~319 locations across two accounts, manually 
-checking 8 documents per location every month is 
-not sustainable. Documents expire, names are 
-inconsistent, some belong to specific technicians, 
-and some require current-year versions only.
+The harder problem is that the documents are not clean data. Titles are free text entered by branch staff, so the same license appears a dozen different ways and is frequently misspelled. Staff upload documents to whichever section of the portal is convenient, so section is a hint rather than a rule. Recorded expiration dates are wrong roughly 15% of the time. Some documents belong to a specific technician and only count if that technician is the one currently servicing the site.
 
-This pipeline automates collection and evaluation 
-of all compliance data monthly.
-
----
+Separately, every location has a contracted device count and service frequency. Confirming that a technician actually serviced the right devices the right number of times means reconciling work-order exports against a contract grid — a step that was rarely done manually because it was too laborious.
 
 ## Architecture
 
-Portal → Power Automate → temp files →
-Python → Excel → Power BI (in progress)
+Three data streams join on a normalized address key.
 
-**Data flows in two streams that meet in Python:**
+**Stream 1 — Work orders and equipment**
+Raw "Service Detail by Workorder" exports → `parse_service_detail.py` → `WO_Counts_Detail`
 
-Stream 1 — Work Orders
-Portal export → manual cleaning →
-Excel (page tab) → Power Query →
-Location_Month_Summary
+**Stream 2 — Compliance documents**
+Portal → Power Automate scrape → temp files → `write_to_excel.py` → `Raw_Document_Pull`
 
-Stream 2 — Compliance Documents
-Portal → Power Automate scrapes each location →
-write_to_excel.py → Raw_Document_Pull
+**Stream 3 — Contract scope and maps**
+Master Grid → `read_sow_v2.py` → `SOW_Lookup`, plus manually verified counts in `Map_Manual_Data`
 
-Both streams join in evaluate_compliance.py, 
-which runs 8 checks per location and writes 
-results to Compliance_Eval.
+`compare_equipment.py` joins streams 1 and 3 to produce `Equipment_Compliance`. `evaluate_compliance.py` then joins everything and writes `Compliance_Eval`.
 
----
+Only Stream 2 depends on the portal's user interface. That separation is deliberate: when the portal was rebuilt on a new front-end framework, streams 1 and 3 were unaffected and equipment reporting kept running while the scraper was repaired.
 
 ## Scale
 
@@ -67,94 +52,64 @@ results to Compliance_Eval.
 |---|---|
 | Client A locations | ~131 |
 | Client B locations | ~188 |
-| Total locations | ~319 |
-| Compliance checks per location | 8 |
+| Total locations | 319 |
+| Document checks per location | 8 |
+| Device types reconciled | 3 |
 | Automation flows | 2 (one per client) |
-| Run frequency | Monthly |
+| Locations requiring manual review by design | ~17 |
+| Run cadence | Monthly |
 
----
+## Key engineering decisions
 
-## Tools & Technologies
+**Verdicts instead of booleans.** The original equipment check returned MATCH / MISMATCH and was wrong constantly on weekly-service locations, where 54 devices serviced weekly produce ~216 scans a month and any exact-match test fails. The current version compares actual scans against `devices × visits-per-month` with a 95–110% tolerance band and reports direction and magnitude: `PASS`, `UNDER (n short)`, or `OVER (~Nx, expected Mx)`.
 
-| Tool | Purpose |
-|---|---|
-| Power Automate Desktop | Browser automation and portal scraping |
-| Python 3 | Compliance evaluation and data processing |
-| JavaScript | Injected via PAD to scrape portal page tables |
-| openpyxl | Python library for reading and writing Excel |
-| Excel | Central data store |
-| Power Query | Auto-summarizes work order data on refresh |
-| Power BI | Planned reporting layer — pending licensing |
+**`MANUAL_REVIEW` is a real outcome.** A document that exists but cannot be confidently attributed to the right technician or year is not the same as a missing document. Treating them as the same produces a report nobody trusts. Ambiguity gets its own verdict plus flag text naming the specific document that caused it.
 
----
+**Zone-based device classification.** Device names alone are unreliable — a "Glue Board" may be an insect monitor or an interior rodent device depending on installation zone. Classification uses the zone description as a tiebreaker, with an explicit exterior designation winning over an interior keyword. Genuinely unclear cases are flagged, never guessed.
 
-## Key Engineering Decisions
+**Two levels of deduplication.** Devices are deduplicated by barcode within a work order, so a station scanned twice does not inflate the count. Work orders are deduplicated by ticket number across files, so overlapping date-range exports can be dropped in the folder together safely.
 
-**Temp files as communication layer**
-Power Automate cannot reliably pass variables 
-to Python as command line arguments — special 
-characters in addresses cause crashes. All 
-data passes through temp files instead 
-(temp_address.txt, temp_docs.json, 
-temp_dropnumber.txt).
+**Temp files as the communication layer.** Power Automate cannot reliably pass variables to Python as command-line arguments; special characters in addresses break it. All hand-offs go through temp files, read with an encoding-tolerant reader because Power Automate is inconsistent about UTF-8, UTF-8-with-BOM, and UTF-16.
 
-**Heading-based table targeting**
-JavaScript scraping uses getTableByHeading() 
-to find tables by their heading text rather 
-than hardcoded index numbers. This makes the 
-scraper resilient to portal UI updates.
+**Heading-based table targeting.** Injected JavaScript locates tables by heading text rather than DOM index. Index-based selectors broke on every portal update; heading-based ones survived a full front-end rebuild.
 
-**Hash-based map change detection**
-Floor plan PDFs are manually verified once and 
-stored in Map_Manual_Data. map_hash.py 
-fingerprints each PDF monthly — only changed 
-maps require re-review.
+**Typo normalization.** A correction dictionary fixes 47 known misspellings before any keyword matching runs.
 
-**Typo normalization**
-Document names uploaded by branch staff are 
-inconsistent. A TYPO_MAP dictionary 
-auto-corrects known misspellings before 
-keyword matching runs.
+**Selective trust between conflicting sources.** Portal expiration dates are wrong about 15% of the time. For insurance certificates, an explicit year in the title is trusted ahead of the recorded expiration date, with the date as fallback. This was a measured decision about which field lies less often.
 
-**OCR abandoned**
-Tesseract OCR was tested for reading device 
-counts from map PDFs. Results were unreliable 
-due to inconsistent map quality across 
-locations. Replaced with manual verification 
-plus hash-based change detection.
+**OCR abandoned on evidence.** Tesseract was tested for reading device counts from floor-plan PDFs and gave unreliable results across hand-drawn, scanned, and digital maps. It was replaced with one-time manual verification plus hash-based change detection, so a map is re-reviewed only when the file actually changes. The OCR code is retained in the codebase, unused, for possible future revisit.
 
----
+## Reporting
 
-## Compliance Check Results
+`Compliance_Eval` appends rather than overwrites, so the output tab accumulates one row per location per month. Power BI reads that history and turns it into something branch managers actually receive — their own locations, their own open items, and what specifically is wrong with each — replacing the individual emails the manual process depended on. Regional and division-level views are provided as the account requires.
+
+Access is currently handled by distributing separate reports rather than by a row-level security rule in the model. Row-level security is the correct fix and the natural next step; distribution works, but it scales with the number of branches instead of staying constant.
+
+## Verdict meanings
 
 | Value | Meaning |
 |---|---|
-| PASS | Document found, valid, correct year, correct tech |
-| MISSING | No matching document found |
-| EXPIRED | Document found but expiration date has passed |
-| WRONG_YEAR | Document is from prior year |
-| MANUAL_REVIEW | Unclear date/name or multi-drop location |
-| EXEMPT | Check does not apply to this location |
-| NO_DATA | Work order data not found for this period |
+| `PASS` | Found, valid, correct technician and year where applicable |
+| `MISSING` | No matching document found |
+| `EXPIRED` | Found but past its expiration date for the audit month |
+| `WRONG_YEAR` | Found but from the prior calendar year |
+| `MANUAL_REVIEW` | Found but technician, date, or title is ambiguous |
+| `EXEMPT` | Does not apply — franchise location or state exception |
+| `NO_DATA` | Equipment only: no work-order data for this month |
 
----
-
-## Current Status
+## Status
 
 | Component | Status |
 |---|---|
-| Client A automation flow | Complete |
-| Client B automation flow | Complete |
-| write_to_excel.py | Complete |
-| evaluate_compliance.py | Complete |
-| Full monthly runs | Complete |
-| Last_WO_Tech auto-update script | In progress |
-| Power BI dashboard | Pending licensing |
-
----
+| Client A automation flow | Running |
+| Client B automation flow | Running |
+| Work-order and equipment pipeline | Running |
+| Document scrape and compliance scoring | Running |
+| Map change detection | Running |
+| Power BI reporting layer | Running |
+| Row-level security in the Power BI model | Not implemented — access handled by distribution |
+| Multi-drop location automation | Deferred |
 
 ## Author
 
-Savanna Mullins
-Built independently as a self-initiated project 
-outside of a formal data role.
+Savanna Mullins — built independently as a self-initiated project outside of a formal engineering role.
