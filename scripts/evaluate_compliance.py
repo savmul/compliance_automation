@@ -6,12 +6,24 @@ from datetime import datetime, date
 import calendar
 
 # ─────────────────────────────────────────────────────────────────────
+# NOTE ON GENERICIZATION
+# Client, employer, and system names have been replaced throughout this
+# file for public release: CLIENT_A / CLIENT_B are two national accounts,
+# and "the portal" is a proprietary service-management platform.
+#
+# The document-title keyword lists below are therefore illustrative
+# rather than runnable — in production they contain the real strings that
+# appear in scanned document titles. The matching logic, thresholds, and
+# control flow are unchanged.
+# ─────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────
 # PATHS  — update each month as needed
 # ─────────────────────────────────────────────────────────────────────
-COMPLIANCE_PATH     = r'C:\Automation\portal_Compliance_Model.xlsx'
-SERVICE_TICKET_PATH = r'C:\Automation\2026_portal_Service_Ticket_Report.xlsx'
+COMPLIANCE_PATH     = r'C:\Automation\Compliance_Model.xlsx'
+SERVICE_TICKET_PATH = r'C:\Automation\Service_Ticket_Report.xlsx'
 MAPS_FOLDER         = r'C:\Automation\Maps'
-AUDIT_MONTH         = 'January 2026'   # ← update each month
+AUDIT_MONTH         = 'August 2026'   # ← update each month
 
 # ─────────────────────────────────────────────────────────────────────
 # AUDIT PERIOD SETUP
@@ -51,11 +63,27 @@ print(f"Quarter needed: Q{RR['qn']} {RR['qy']}")
 # ─────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────
+_SUFFIX = {'ROAD':'RD','STREET':'ST','AVENUE':'AVE','DRIVE':'DR','BOULEVARD':'BLVD',
+           'LANE':'LN','HIGHWAY':'HWY','CIRCLE':'CIR','COURT':'CT','PARKWAY':'PKWY',
+           'PLACE':'PL','TERRACE':'TER','ROUTE':'RT'}
+
 def norm_addr(addr):
+    """Normalize an address into a join key. Same logic as compare_equipment.py
+    so SOW_Lookup / WO_Counts_Detail / Map_Manual_Data / Raw_Document_Pull /
+    Client_A_Locations all collapse to the same key.
+    - keeps only the street portion before the first comma
+    - drops any prefix text before the first street-number token
+    - standardizes ROAD/STREET/AVENUE/... -> RD/ST/AVE/...
+    """
     if not addr: return ''
-    addr = str(addr).upper().strip()
-    addr = re.sub(r'[.,]', '', addr)
-    return re.sub(r'\s+', ' ', addr).strip()
+    s = str(addr).split(',')[0].upper().replace('.', '')
+    s = re.sub(r'\s+', ' ', s).strip()
+    toks = s.split()
+    for i, t in enumerate(toks):
+        if t[:1].isdigit():
+            toks = toks[i:]
+            break
+    return ' '.join(_SUFFIX.get(w, w) for w in toks)
 
 def norm_name(name):
     if not name: return ''
@@ -104,6 +132,44 @@ def has_explicit_wrong_year(title):
     qy = str(RR['qy'])
     return bool(norm) and qy not in norm
 
+def parse_inspection_date(s, audit_year):
+    """Parse inspection date string into a date object.
+    Handles: '01/03/2025', '27 Jan', '6 Feb (4 weeks ago)', '15 Jan 2026'
+    Falls back to audit_year when no year present."""
+    if not s: return None
+    s = str(s).strip()
+    # Remove relative parts like "(4 weeks ago)"
+    s = re.sub(r'\(.*?\)', '', s).strip()
+    # Try standard formats first
+    for fmt in ('%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d', '%d %b %Y', '%d %B %Y'):
+        try: return datetime.strptime(s, fmt).date()
+        except: pass
+    # Try partial "27 Jan" or "6 Feb" — assume audit_year
+    for fmt in ('%d %b', '%d %B'):
+        try:
+            d = datetime.strptime(s, fmt)
+            return d.replace(year=audit_year).date()
+        except: pass
+    return None
+
+def implied_quarter_year(title, insp_date):
+    """For a doc with quarter keyword but no year, use inspection_date to infer year.
+    Rule: Q4 docs uploaded in Jan-Mar → Q4 of previous year.
+    All other quarter/month combos → same year as inspection_date."""
+    if not insp_date: return None
+    t = str(title or '').upper()
+    # Find quarter number from title
+    qn = None
+    if any(w in t for w in ['Q4','Q-4','4TH QTR','4TH QUARTER','FOURTH QUARTER']): qn = 4
+    elif any(w in t for w in ['Q1','Q-1','1ST QTR','1ST QUARTER','FIRST QUARTER']): qn = 1
+    elif any(w in t for w in ['Q2','Q-2','2ND QTR','2ND QUARTER','SECOND QUARTER']): qn = 2
+    elif any(w in t for w in ['Q3','Q-3','3RD QTR','3RD QUARTER','THIRD QUARTER']): qn = 3
+    if qn is None: return None
+    # Q4 uploaded in Jan-Mar means it covers Q4 of prior year
+    if qn == 4 and insp_date.month in (1, 2, 3):
+        return (qn, insp_date.year - 1)
+    return (qn, insp_date.year)
+
 def name_tokens(name):
     parts = [p for p in norm_name(name).split() if len(p) > 1]
     if len(parts) >= 2: return parts[0], parts[-1]
@@ -128,7 +194,7 @@ def tech_in_title(tech, title):
 def is_vague(t):
     return str(t or '').strip().upper() in {
         'CERTIFICATE','CERTIFICATION','LICENSE','LICENCE','LICENSES',
-        'client_a','client_aCO','IPM','GMP','CGMP','PURDUE','AIB','NPMA',
+        'CLIENT_A','CLIENT_A','IPM','GMP','CGMP','PURDUE','AIB','NPMA',
         'INSURANCE','TRAINING','N/A','GOLD MEDAL','NPMA'}
 
 # ─────────────────────────────────────────────────────────────────────
@@ -273,15 +339,21 @@ def evaluate_map(address, sow_erb=None, sow_irt=None, sow_ifl=None):
 
     # ── dated ────────────────────────────────────────────────────────
     dated = any(re.search(p, text, re.IGNORECASE) for p in DATE_PATTERNS)
-    r['map_dated'] = 'PASS' if dated else 'MANUAL_REVIEW'
-    if not dated:
-        r['map_flags'].append('No date found on map')
+    if dated:
+        r['map_dated'] = 'PASS'
+    elif text:  # OCR ran but found nothing
+        r['map_dated'] = 'NO_OCR'
+        r['map_flags'].append('Map date not readable — verify manually')
+    else:  # no OCR available
+        r['map_dated'] = 'NO_OCR'
 
     # ── signed ───────────────────────────────────────────────────────
     signed = any(re.search(p, text) for p in SIGNED_PATTERNS)
-    r['map_signed'] = 'PASS' if signed else 'MANUAL_REVIEW'
-    if not signed:
-        r['map_flags'].append('No signature/reviewer found on map')
+    if signed:
+        r['map_signed'] = 'PASS'
+    else:
+        r['map_signed'] = 'NO_OCR'
+        r['map_flags'].append('Map signature not readable — verify manually')
 
     # ── compare counts to SOW ────────────────────────────────────────
     count_mismatches = []
@@ -299,7 +371,12 @@ def evaluate_map(address, sow_erb=None, sow_irt=None, sow_ifl=None):
     everything_clean = (counts_match and r['map_signed'] == 'PASS'
                         and r['map_dated'] == 'PASS'
                         and erb is not None and irt is not None and ifl is not None)
-    r['map_status'] = 'PASS' if everything_clean else 'MANUAL_REVIEW'
+    if everything_clean:
+        r['map_status'] = 'PASS'
+    elif r['map_dated'] == 'NO_OCR' or r['map_signed'] == 'NO_OCR':
+        r['map_status'] = 'NO_OCR'
+    else:
+        r['map_status'] = 'MANUAL_REVIEW'
 
     return r
 
@@ -308,13 +385,23 @@ def is_bundled(t):
     return any(kw in t for kw in ['ALL APPLICATOR','ALL TECH','ALL LICENSE',
         'ALL CERTS','MULTIPLE','CERTIFICATES AND LICENSES'])
 
+def is_branch_tech_bundle(t):
+    """True for docs that bundle a business/branch license AND a tech license
+    in one PDF (e.g. 'Business & Tech License'). We can't confirm either side
+    without opening it, so both columns get flagged for manual review."""
+    t = str(t or '').upper()
+    has_lic  = 'LICENSE' in t or 'LIC ' in t
+    has_bus  = 'BUSINESS' in t or 'BUS ' in t or 'BRANCH' in t
+    has_tech = 'TECH' in t or 'TECHNICIAN' in t
+    return has_lic and has_bus and has_tech
+
 # ─────────────────────────────────────────────────────────────────────
 # DOC CLASSIFIER
 # ─────────────────────────────────────────────────────────────────────
 # Common typo corrections — applied before any keyword matching
 TYPO_MAP = {
-    # client_a
-    'client_a':'client_a', 'client_a':'client_a', 'client_a':'client_a',
+    # Client name misspellings (genericized; production list holds the real variants)
+    'CLEINT':'CLIENT_A', 'CLINET':'CLIENT_A', 'CLIETN':'CLIENT_A',
     # License
     'LISENSE':'LICENSE', 'LICESNSE':'LICENSE', 'LISCENSE':'LICENSE',
     'LICSENSE':'LICENSE', 'LICNESE':'LICENSE', 'LISENSCE':'LICENSE',
@@ -366,7 +453,7 @@ def classify(title, doc_area):
     BRANCH_KW = [
         'BRANCH LIC','BRANCH LICENSE','PESTICIDE BUSINESS LICENSE',
         'PEST CONTROL BUSINESS LICENSE','BUSINESS LICENSE','COMPANY LICENSE',
-        'BRANCH PC LICENSE','company BRANCH LICENSE','FDACS BRANCH',
+        'BRANCH PC LICENSE','PROVIDER BRANCH LICENSE','FDACS BRANCH',
         'STRUCTURAL PEST CONTROL COMPANY LICENSE','SPCS BUSINESS LICENSE',
         'BUS LIC','BRANCH DEPT OF AG','PESTICIDE CONTRACTOR',
         'OCCUPATIONAL LICENSE','BUSINESS TAX RECEIPT','BROWARD',
@@ -381,7 +468,7 @@ def classify(title, doc_area):
     # COI
     COI_KW = ['COI','CERTIFICATE OF INSURANCE','CERTIFICATE OF LIABILITY',
         'LIABILITY INSURANCE','INSURANCE CERTIFICATE','INSURANCE 2026',
-        'INSURANCE 2025','company COI','AUTO INSURANCE',
+        'INSURANCE 2025','PROVIDER COI','AUTO INSURANCE',
         '2026 INSURANCE','2025 INSURANCE']
     for kw in COI_KW:
         if kw in t: return 'COI'
@@ -395,8 +482,8 @@ def classify(title, doc_area):
         'ANNUAL FACILITY RISK','ANNUAL PLAN','ANNUAL QA','YEARLY ASSESSMENT',
         'FACILITY SITE ASSESSMENT','COMPLIANCE ASSESSMENT','RISK ASSESSMENT',
         'FLOOR LEVEL INSPECTION','QA INSPECTION REPORT','QA ASSESSMENT',
-        'client_a SERVICE COMPLIANCE','client_b ANNUAL','MANAGER ANNUAL',
-        'company ANNUAL','company FACILITY','SITE INSPECTION','SITE ASSESSMENT',
+        'CLIENT_A SERVICE COMPLIANCE','CLIENT_B ANNUAL','MANAGER ANNUAL',
+        'PROVIDER ANNUAL','PROVIDER FACILITY','SITE INSPECTION','SITE ASSESSMENT',
         'INSPECTION REPORT','ASSESMENT','ASSESSMENT']
     for kw in ANNUAL_KW:
         if kw in t: return 'Annual_Report'
@@ -417,7 +504,7 @@ def classify(title, doc_area):
     # PESTICIDE LOG
     LOG_KW = ['PESTICIDE USAGE LOG','PESTICIDE USAGE REPORT',
         'PESTICIDE USAGE','PEST USAGE LOG','PEST USAGE',
-        'PUL ','client_a BAINBRIDGE PUL','client_b BIN PESTICIDE',
+        'PUL ','CLIENT_A SITE PUL','CLIENT_B BIN PESTICIDE',
         'PREVIOUS 12 MONTH PESTICIDE','PESTICIDE CONTRACTORS LICENSE',
         'CHEMICAL CORRECTION',
         'Q1 PESTICIDE USAGE','Q2 PESTICIDE USAGE',
@@ -436,19 +523,19 @@ def classify(title, doc_area):
     for kw in IPM_KW:
         if kw in t: return 'IPM_Cert'
 
-    # client_a CERT (tech-level)
-    client_a_KW = ['client_a CERT','client_a CERT','client_a CERTIFICATE',
-        'client_a CERTIFICATION','client_a CERTIFICATION','client_a TRAINING',
-        'client_a TRAINING','client_a ','client_a SERVICE',
+    # CLIENT_A CERT (tech-level)
+    CLIENT_CERT_KW = ['CLIENT_A CERT','CLIENT_A CERT','CLIENT_A CERTIFICATE',
+        'CLIENT_A CERTIFICATION','CLIENT_A CERTIFICATION','CLIENT_A TRAINING',
+        'CLIENT_A TRAINING','CLIENT_A ','CLIENT_A SERVICE',
         'SERVICE AUDITS SALES','SERVICE, AUDITS, SALES',
         'SERVICING GOLD MEDAL','SERVICING PPGM','GOLD MEDAL TRAINING',
-        'client_b CERT','client_b CGMP','client_a SERVICE',
+        'CLIENT_B CERT','CLIENT_B CGMP','CLIENT_A SERVICE',
         ]
-    for kw in client_a_KW:
-        if kw in t: return 'client_a_Cert'
-    # "client_a" alone in branch_techs section = client_a cert (common portal naming)
-    if area == 'branch_techs' and t.strip() in ('client_a','client_a'):
-        return 'client_a_Cert'
+    for kw in CLIENT_CERT_KW:
+        if kw in t: return 'Client_Cert'
+    # "Client A" alone in branch_techs section = Client A cert (common the portal naming)
+    if area == 'branch_techs' and t.strip() in ('CLIENT_A','CLIENT_A'):
+        return 'Client_Cert'
 
     # TECH LICENSE
     TECH_KW = ['APPLICATOR LICENSE','APPLICATORS LICENSE','APPLICATOR CARD',
@@ -469,8 +556,9 @@ def classify(title, doc_area):
         'ID CARD','STATE ID','MISS TECH ID CARD','AGRICULTURE CARD',
         '7C','ALL APPLICATOR CARDS','RECENT ADDITION APPLICATOR',
         'PRO LICENSE','GREENPRO','GREEN PRO','QUALITY PRO',
-        'company LICENSE','APL','CERT CARD','CEUS',
-        'COMMERCIAL OP','COMMERCIAL SERVICE CERTIFICATION']
+        'PROVIDER LICENSE','APL','CERT CARD','CEUS',
+        'COMMERCIAL OP','COMMERCIAL SERVICE CERTIFICATION',
+        'CERTIFICATION']
     for kw in TECH_KW:
         if kw in t: return 'PC_License_Tech'
     # "License YYYY" in branch_techs = tech license
@@ -492,35 +580,55 @@ except Exception as e:
 
 # raw docs
 ws_raw = wb['Raw_Document_Pull']
-raw_docs = []
+raw_docs_all = []
 for i, row in enumerate(ws_raw.iter_rows(values_only=True)):
     if i == 0: continue
     if not row[0]: continue
-    raw_docs.append({
-        'address':     norm_addr(row[0]),
-        'address_raw': row[0],
-        'doc_area':    str(row[1] or '').strip().lower(),
-        'tech_name':   str(row[2] or '').strip(),
-        'doc_title':   str(row[3] or '').strip(),
-        'exp_date':    row[4],
+    doc_area = str(row[1] or '').strip().lower()
+    pull_date_raw = row[5] if len(row) > 5 else None
+    raw_docs_all.append({
+        'address':          norm_addr(row[0]),
+        'address_raw':      row[0],
+        'doc_area':         doc_area,
+        'tech_name':        str(row[2] or '').strip() if doc_area != 'qa_manual' else '',
+        'inspection_date':  str(row[2] or '').strip() if doc_area == 'qa_manual' else '',
+        'doc_title':        str(row[3] or '').strip(),
+        'exp_date':         row[4],
+        'pull_date':        pull_date_raw,
     })
-print(f"  ✓ Raw docs: {len(raw_docs)} rows, {len(set(d['address'] for d in raw_docs))} unique addresses")
 
-# last WO tech
-ws_wo = wb['Last_WO_Tech']
+# For each address, only use the most recently pulled rows
+# This ensures reruns overwrite old data without losing history in the tab
+def _to_date(pd_raw):
+    if pd_raw is None: return date.min
+    if isinstance(pd_raw, datetime): return pd_raw.date()
+    if isinstance(pd_raw, date): return pd_raw
+    d = parse_date(pd_raw)
+    return d if d else date.min
+
+# Find latest pull_date per address
+latest_pull = {}
+for d in raw_docs_all:
+    addr = d['address']
+    pd = _to_date(d['pull_date'])
+    if addr not in latest_pull or pd > latest_pull[addr]:
+        latest_pull[addr] = pd
+
+# Keep only rows from the latest pull for each address
+raw_docs = [d for d in raw_docs_all
+            if _to_date(d['pull_date']) == latest_pull.get(d['address'], date.min)]
+print(f"  ✓ Raw docs: {len(raw_docs)} rows (most recent pull per address, of {len(raw_docs_all)} total), {len(set(d['address'] for d in raw_docs))} unique addresses")
+
+# Last WO tech — populated from WO_Counts_Detail inside the service ticket
+# block below. Initialized empty here so downstream code never KeyErrors if
+# the service ticket workbook fails to load.
 last_wo_tech = {}
-for i, row in enumerate(ws_wo.iter_rows(values_only=True)):
-    if i == 0: continue
-    if not row[0]: continue
-    addr  = norm_addr(row[0])
-    tech  = str(row[4] or '').strip()
-    if tech.startswith('='): tech = ''
-    last_wo_tech[addr] = tech
-print(f"  ✓ Last WO Tech: {len(last_wo_tech)} entries")
+
+equip_verdicts = {}
 
 # locations
 locations = {}
-for sheet in ['client_a_Locations','client_b_Locations']:
+for sheet in ['Client_A_Locations','Client_B_Locations']:
     ws = wb[sheet]
     for i, row in enumerate(ws.iter_rows(values_only=True)):
         if i == 0: continue
@@ -543,29 +651,117 @@ for i, row in enumerate(ws_st.iter_rows(values_only=True)):
     state_exc[str(row[0]).upper().strip()] = str(row[1] or 'YES').upper().strip()
 print(f"  ✓ State exceptions: {len(state_exc)} states")
 
+# multi-drop locations (flag for manual review)
+multidrop_addrs = set()
+for sheet in ['Client_A_MultiDrop', 'Client_B_MultiDrop']:
+    if sheet in wb.sheetnames:
+        ws_md = wb[sheet]
+        for i, row in enumerate(ws_md.iter_rows(values_only=True)):
+            if i == 0: continue
+            if not row[0]: continue
+            drop_num = str(row[1]).strip() if row[1] is not None else '1'
+            if drop_num in ('2', '3'):
+                multidrop_addrs.add(norm_addr(row[0]))
+print(f"  ✓ Multi-drop locations: {len(multidrop_addrs)} flagged for manual review")
+
+# Map_Manual_Data — manually-entered map counts (source of truth for maps)
+map_data = {}
+if 'Map_Manual_Data' in wb.sheetnames:
+    ws_md = wb['Map_Manual_Data']
+    def _mi(v):
+        if v in (None, ''): return None
+        try: return int(v)
+        except (ValueError, TypeError): return None
+    for i, row in enumerate(ws_md.iter_rows(values_only=True)):
+        if i == 0: continue
+        if not row[0]: continue
+        addr = norm_addr(row[0])
+        map_data[addr] = {
+            'erb':    _mi(row[2]),
+            'irt':    _mi(row[3]),
+            'ifl':    _mi(row[4]),
+            'dated':  str(row[5] or '').strip().upper(),   # YES / NO / ''
+            'signed': str(row[6] or '').strip().upper(),
+        }
+    print(f"  ✓ Map manual data: {len(map_data)} entries")
+
 # service ticket (optional — won't crash if missing)
 sow_counts     = {}
 scanned_counts = {}
 print(f"\nLoading service ticket report...")
 try:
     wb_st = openpyxl.load_workbook(SERVICE_TICKET_PATH)
-    ws_loc = wb_st['Location_Month_Summary']
-    for i, row in enumerate(ws_loc.iter_rows(values_only=True)):
+    # Month filter — service ticket Month column is stored as 1st of month (1/1/2026 etc)
+    audit_m = RR['month_end'].month
+    audit_y = RR['month_end'].year
+
+    def _row_month_matches(month_val):
+        """Returns True if month_val matches the audit month/year."""
+        if month_val is None: return False
+        if isinstance(month_val, (datetime, date)):
+            d = month_val if isinstance(month_val, date) else month_val.date()
+            return d.month == audit_m and d.year == audit_y
+        # Try parsing string
+        d = parse_date(str(month_val))
+        return d is not None and d.month == audit_m and d.year == audit_y
+
+    # Short month key used to filter WO_Counts_Detail and Equipment_Compliance
+    # (those tabs store month as e.g. "Feb 2026" — match that format)
+    short_audit = RR['month_end'].strftime('%b %Y')
+
+    # SOW DEVICE COUNTS (used by map comparison; NOT the equipment verdict).
+    ws_sow = wb_st['SOW_Lookup']
+    def _to_int(v):
+        if v in (None, ''): return 0
+        try: return int(v)
+        except (ValueError, TypeError): return 0   # 'CANCELLED' etc.
+    for i, row in enumerate(ws_sow.iter_rows(values_only=True)):
         if i == 0: continue
         if not row[0]: continue
         addr = norm_addr(row[0])
-        sow_counts[addr] = {'ERB': row[5] or 0, 'IRT': row[6] or 0, 'IFL': row[7] or 0}
-    ws_wos = wb_st['WO_Summary']
-    for i, row in enumerate(ws_wos.iter_rows(values_only=True)):
+        sow_counts[addr] = {'ERB': _to_int(row[1]),
+                            'IRT': _to_int(row[5]),
+                            'IFL': _to_int(row[9])}
+
+    # TECH NAME per address — earliest non-zero WO of the audit month from
+    # WO_Counts_Detail. "LAST, FIRST" gets flipped to "FIRST LAST" for matching
+    # against the doc tables.
+    def _flip_name(n):
+        if ',' in n:
+            parts = [p.strip() for p in n.split(',', 1)]
+            if len(parts) == 2 and parts[1]:
+                return f'{parts[1]} {parts[0]}'
+        return n
+
+    tech_candidates = {}
+    ws_wod = wb_st['WO_Counts_Detail']
+    for i, row in enumerate(ws_wod.iter_rows(values_only=True)):
         if i == 0: continue
-        if not row[1]: continue
+        if not row[1] or not row[6]: continue
+        if str(row[6]).strip() != short_audit: continue
+        if (row[9] or 0) + (row[10] or 0) + (row[11] or 0) == 0:
+            continue   # skip 0/0/0 birdwork/termite tickets
         addr = norm_addr(row[1])
-        if addr not in scanned_counts:
-            scanned_counts[addr] = {'ERB': 0, 'IRT': 0, 'IFL': 0}
-        scanned_counts[addr]['ERB'] += (row[5] or 0)
-        scanned_counts[addr]['IRT'] += (row[6] or 0)
-        scanned_counts[addr]['IFL'] += (row[7] or 0)
-    print(f"  ✓ Service ticket loaded — {len(sow_counts)} SOW rows")
+        completed = parse_date(row[5])
+        tech_candidates.setdefault(addr, []).append((completed, str(row[3] or '').strip()))
+    for addr, cands in tech_candidates.items():
+        cands.sort(key=lambda x: x[0] or date.max)
+        last_wo_tech[addr] = _flip_name(cands[0][1])
+
+    # EQUIPMENT VERDICT per address — pre-computed in Equipment_Compliance.
+    equip_verdicts = {}
+    if 'Equipment_Compliance' in wb_st.sheetnames:
+        ws_eq = wb_st['Equipment_Compliance']
+        for i, row in enumerate(ws_eq.iter_rows(values_only=True)):
+            if i == 0: continue
+            if not row[0]: continue
+            if str(row[2]).strip() != short_audit: continue
+            equip_verdicts[norm_addr(row[0])] = str(row[22] or 'NO_DATA').strip()
+        print(f"  ✓ Equipment verdicts: {len(equip_verdicts)} for {AUDIT_MONTH}")
+    else:
+        print(f"  ⚠ Equipment_Compliance tab not found — run compare_equipment.py first")
+
+    print(f"  ✓ Service ticket loaded — {len(sow_counts)} SOW rows, {len(last_wo_tech)} tech entries")
 except Exception as e:
     print(f"  ⚠ Service ticket not loaded: {e}")
     print("    Equipment match will show NO_DATA (this is OK, rest will still run)")
@@ -592,12 +788,45 @@ for addr, docs in docs_by_addr.items():
     state_req  = state_exc.get(state, 'YES') == 'YES'
 
     if not loc:
-        print(f"  WARN: {addr} not in client_a or client_b locations tab")
+        print(f"  WARN: {addr} not in Client A or Client B locations tab")
+
+    # multi-drop locations — flag everything for manual review
+    if addr in multidrop_addrs:
+        original_addr = docs[0]['address_raw'] if docs else addr
+        results.append({
+            'audit_month':       AUDIT_MONTH,
+            'address':           original_addr,
+            'branch':            (loc or {}).get('branch', ''),
+            'state':             (loc or {}).get('state', ''),
+            'company':           (loc or {}).get('company', ''),
+            'tech_name':         tech_name,
+            'PC_license_branch': 'MANUAL_REVIEW',
+            'PC_license_tech':   'MANUAL_REVIEW',
+            'client_cert':        'MANUAL_REVIEW',
+            'IPM_cert':          'MANUAL_REVIEW',
+            'COI':               'MANUAL_REVIEW',
+            'annual_report':     'MANUAL_REVIEW',
+            'quarterly_trend':   'MANUAL_REVIEW',
+            'pesticide_log':     'MANUAL_REVIEW',
+            'equipment_match':   'MANUAL_REVIEW',
+            'map_found':         'MANUAL_REVIEW',
+            'map_erb':           '',
+            'map_irt':           '',
+            'map_ifl':           '',
+            'map_dated':         '',
+            'map_signed':        '',
+            'map_vs_sow':        'MANUAL_REVIEW',
+            'map_mismatch_detail': '',
+            'flags':             'Multi-drop location — verify correct drop in the portal manually',
+            'last_checked':      datetime.today().strftime('%m/%d/%Y'),
+        })
+        print(f"  ⚠ {original_addr}  MULTI-DROP — flagged for manual review")
+        continue
 
     # starting values
     pc_branch  = 'MISSING'
     pc_tech    = 'MISSING' if state_req else 'EXEMPT'
-    client_a_cert = 'MISSING'
+    client_cert = 'MISSING'
     ipm_cert   = 'MISSING'
     coi        = 'MISSING'
     annual     = 'MISSING'
@@ -611,6 +840,27 @@ for addr, docs in docs_by_addr.items():
         row_tech = doc['tech_name']
         es       = exp_status(doc['exp_date'])
         dtype    = classify(title, doc_area)
+
+        # Bundled "Business & Tech License" — one PDF covering both a branch
+        # license and a tech license. Must be opened, so flag both for review.
+        if is_branch_tech_bundle(title):
+            if pc_branch != 'PASS':
+                pc_branch = 'MANUAL_REVIEW'
+                doc_flags.append(f'PC_License_Branch: bundled branch+tech doc "{title}"')
+            if state_req and pc_tech != 'PASS':
+                pc_tech = 'MANUAL_REVIEW'
+                doc_flags.append(f'PC_License_Tech: bundled branch+tech doc "{title}"')
+            continue
+
+        # Ambiguous "training cert" with no clear program name — at these
+        # accounts that's almost always Client A service training, but we can't
+        # be sure without opening it, so flag Client A for review (never overrides
+        # a real Client A PASS found elsewhere).
+        if dtype is None and 'TRAINING' in fix_typos(str(title).upper()) and 'CERT' in str(title).upper():
+            if client_cert == 'MISSING':
+                client_cert = 'MANUAL_REVIEW'
+                doc_flags.append(f'Client_Cert: ambiguous training cert "{title}"')
+            continue
 
         if dtype is None:
             continue
@@ -626,7 +876,7 @@ for addr, docs in docs_by_addr.items():
                 doc_flags.append(f'PC_License_Branch: EXPIRED "{title}"')
 
         # ── COI ──────────────────────────────────────────────────────
-        # NOTE: portal expiration dates are unreliable (~15% wrong).
+        # NOTE: the portal expiration dates are unreliable (~15% wrong).
         # Rule: if the title clearly contains the audit year (e.g. "Insurance 2026"),
         # that overrides the expiration date and counts as PASS.
         # If no year in title, we still check the expiration date as a fallback.
@@ -640,14 +890,12 @@ for addr, docs in docs_by_addr.items():
                     coi = 'WRONG_YEAR'
                 doc_flags.append(f'COI: title shows {RR["annual_year"]-1}, need {RR["annual_year"]} "{title}"')
             else:
-                # No year in title — fall back to expiration date check
+                # No year in title — fall back to the expiration date.
+                # A COI with a valid (not-yet-expired) date is active coverage,
+                # so it PASSES even if the exp year is past the audit year
+                # (e.g. expires 1/1/2027 — still covers a Feb 2026 audit).
                 if es == 'VALID':
-                    exp_d = parse_date(doc['exp_date'])
-                    if exp_d and exp_d.year == RR['annual_year']:
-                        coi = 'PASS'   # exp year matches audit year — trust it
-                    elif coi not in ('PASS',):
-                        coi = 'MANUAL_REVIEW'
-                        doc_flags.append(f'COI: no year in title, exp date used - manual verify "{title}"')
+                    coi = 'PASS'
                 elif es == 'EXPIRED' and coi != 'PASS':
                     coi = 'EXPIRED'
                     doc_flags.append(f'COI: no year in title and EXPIRED "{title}" exp={doc["exp_date"]}')
@@ -657,13 +905,23 @@ for addr, docs in docs_by_addr.items():
 
         # ── ANNUAL REPORT ────────────────────────────────────────────
         elif dtype == 'Annual_Report':
-            # only count qa_manual rows for annual/trend/log
             if doc_area != 'qa_manual': continue
             if has_year(title, RR['annual_year']):
                 annual = 'PASS'
             elif annual != 'PASS':
-                annual = 'MANUAL_REVIEW'
-                doc_flags.append(f'Annual_Report: year unclear, need {RR["annual_year"]} "{title}"')
+                # Check inspection_date year as fallback
+                insp = parse_inspection_date(doc.get('inspection_date',''), RR['annual_year'])
+                if insp and insp.year == RR['annual_year']:
+                    annual = 'PASS'  # inspection date confirms current year
+                elif has_year(title, RR['annual_year'] - 1):
+                    # Explicitly prior year — MISSING not MANUAL_REVIEW
+                    doc_flags.append(f'Annual_Report: {RR["annual_year"]-1} doc found, need {RR["annual_year"]} "{title}"')
+                elif insp and insp.year < RR['annual_year']:
+                    # Inspection date shows prior year — MISSING
+                    doc_flags.append(f'Annual_Report: inspection date {insp.year}, need {RR["annual_year"]} "{title}"')
+                else:
+                    annual = 'MANUAL_REVIEW'
+                    doc_flags.append(f'Annual_Report: year unclear, need {RR["annual_year"]} "{title}"')
 
         # ── QUARTERLY TREND ──────────────────────────────────────────
         elif dtype == 'Quarterly_Trend':
@@ -673,8 +931,16 @@ for addr, docs in docs_by_addr.items():
             elif has_explicit_wrong_year(title):
                 doc_flags.append(f'Quarterly_Trend: wrong year, need Q{RR["qn"]} {RR["qy"]} "{title}"')
             elif trend != 'PASS':
-                trend = 'MANUAL_REVIEW'
-                doc_flags.append(f'Quarterly_Trend: need Q{RR["qn"]} {RR["qy"]} "{title}"')
+                # Try inspection_date year hint for undated docs
+                insp = parse_inspection_date(doc.get('inspection_date',''), RR['annual_year'])
+                iqy = implied_quarter_year(title, insp)
+                if iqy and iqy == (RR['qn'], RR['qy']):
+                    trend = 'PASS'  # inspection date confirms correct quarter/year
+                elif iqy and iqy != (RR['qn'], RR['qy']):
+                    doc_flags.append(f'Quarterly_Trend: inferred Q{iqy[0]} {iqy[1]}, need Q{RR["qn"]} {RR["qy"]} "{title}"')
+                else:
+                    trend = 'MANUAL_REVIEW'
+                    doc_flags.append(f'Quarterly_Trend: need Q{RR["qn"]} {RR["qy"]} "{title}"')
 
         # ── PESTICIDE LOG ────────────────────────────────────────────
         elif dtype == 'Pesticide_Log':
@@ -684,19 +950,31 @@ for addr, docs in docs_by_addr.items():
             elif has_explicit_wrong_year(title):
                 doc_flags.append(f'Pesticide_Log: wrong year, need Q{RR["qn"]} {RR["qy"]} "{title}"')
             elif pest_log != 'PASS':
-                pest_log = 'MANUAL_REVIEW'
-                doc_flags.append(f'Pesticide_Log: need Q{RR["qn"]} {RR["qy"]} "{title}"')
+                # Try inspection_date year hint for undated docs
+                insp = parse_inspection_date(doc.get('inspection_date',''), RR['annual_year'])
+                iqy = implied_quarter_year(title, insp)
+                if iqy and iqy == (RR['qn'], RR['qy']):
+                    pest_log = 'PASS'
+                elif iqy and iqy != (RR['qn'], RR['qy']):
+                    doc_flags.append(f'Pesticide_Log: inferred Q{iqy[0]} {iqy[1]}, need Q{RR["qn"]} {RR["qy"]} "{title}"')
+                else:
+                    pest_log = 'MANUAL_REVIEW'
+                    doc_flags.append(f'Pesticide_Log: need Q{RR["qn"]} {RR["qy"]} "{title}"')
 
         # ── TECH-LEVEL DOCS ──────────────────────────────────────────
-        elif dtype in ('PC_License_Tech', 'client_a_Cert', 'IPM_Cert'):
+        # Principle: if a doc of this type EXISTS but we can't confirm whose
+        # it is (no tech-name match) or which year, the column becomes
+        # MANUAL_REVIEW rather than MISSING. A confirmed match can still PASS,
+        # and we never downgrade a PASS already found at this location.
+        elif dtype in ('PC_License_Tech', 'Client_Cert', 'IPM_Cert'):
             if doc_area == 'qa_manual': continue
             # Agents/all-tech cards in insurance section count as branch-level tech license
             if dtype == 'PC_License_Tech' and doc_area == 'insurance':
                 if es == 'VALID' and pc_tech != 'PASS':
                     pc_tech = 'PASS'
                 continue
-            if not tech_name: continue
-            name_match = row_tech_matches(row_tech, tech_name) or tech_in_title(tech_name, title)
+            name_match = bool(tech_name) and (
+                row_tech_matches(row_tech, tech_name) or tech_in_title(tech_name, title))
 
             if dtype == 'PC_License_Tech' and state_req:
                 if name_match:
@@ -707,16 +985,16 @@ for addr, docs in docs_by_addr.items():
                     elif es == 'EXPIRED' and pc_tech != 'PASS':
                         pc_tech = 'EXPIRED'
                         doc_flags.append(f'PC_License_Tech: EXPIRED for {tech_name} "{title}"')
-                elif is_bundled(title):
-                    doc_flags.append(f'PC_License_Tech: bundled doc, manual review "{title}"')
-                elif not is_vague(title):
-                    doc_flags.append(f'PC_License_Tech: no match for {tech_name} "{title}"')
+                elif pc_tech == 'MISSING':
+                    pc_tech = 'MANUAL_REVIEW'
+                    doc_flags.append(f'PC_License_Tech: license doc found, tech unconfirmed "{title}"')
 
-            elif dtype == 'client_a_Cert':
+            elif dtype == 'Client_Cert':
                 if name_match:
-                    client_a_cert = 'PASS'
-                elif not is_vague(title):
-                    doc_flags.append(f'client_a_Cert: no match for {tech_name} "{title}"')
+                    client_cert = 'PASS'
+                elif client_cert == 'MISSING':
+                    client_cert = 'MANUAL_REVIEW'
+                    doc_flags.append(f'Client_Cert: cert found, tech unconfirmed "{title}"')
 
             elif dtype == 'IPM_Cert':
                 if name_match:
@@ -728,27 +1006,46 @@ for addr, docs in docs_by_addr.items():
                     else:
                         if ipm_cert != 'PASS': ipm_cert = 'MANUAL_REVIEW'
                         doc_flags.append(f'IPM_Cert: year unclear "{title}"')
-                elif not is_vague(title):
-                    doc_flags.append(f'IPM_Cert: no match for {tech_name} "{title}"')
+                elif ipm_cert == 'MISSING':
+                    ipm_cert = 'MANUAL_REVIEW'
+                    doc_flags.append(f'IPM_Cert: doc found, tech/year unconfirmed "{title}"')
 
-    # ── EQUIPMENT MATCH ──────────────────────────────────────────────
-    sow     = sow_counts.get(addr)
-    scanned = scanned_counts.get(addr)
-    if sow and scanned:
-        erb_ok = sow['ERB'] == scanned['ERB']
-        irt_ok = sow['IRT'] == scanned['IRT']
-        ifl_ok = sow['IFL'] == scanned['IFL']
-        equip  = 'MATCH' if (erb_ok and irt_ok and ifl_ok) else 'MISMATCH'
-        if not erb_ok: doc_flags.append(f'ERB: SOW={sow["ERB"]} Scanned={scanned["ERB"]}')
-        if not irt_ok: doc_flags.append(f'IRT: SOW={sow["IRT"]} Scanned={scanned["IRT"]}')
-        if not ifl_ok: doc_flags.append(f'IFL: SOW={sow["IFL"]} Scanned={scanned["IFL"]}')
+    # ── EQUIPMENT MATCH (from Equipment_Compliance tab) ──────────────
+    # Single source of truth — verdict pre-computed by compare_equipment.py.
+    equip = equip_verdicts.get(addr, 'NO_DATA')
+
+    # ── MAP COMPARISON (Map_Manual_Data vs SOW device counts) ────────
+    md = map_data.get(addr)
+    sc = sow_counts.get(addr)
+    if md is None:
+        map_found_val = 'NO'
+        map_erb = map_irt = map_ifl = ''
+        map_dated_val = map_signed_val = ''
+        map_vs_sow = 'NO_MAP'
+        map_mismatch = ''
     else:
-        equip = 'NO_DATA'
+        map_erb, map_irt, map_ifl = md['erb'], md['irt'], md['ifl']
+        map_dated_val, map_signed_val = md['dated'], md['signed']
+        map_found_val = 'YES' if any(v is not None for v in (map_erb, map_irt, map_ifl)) else 'NO'
+        if not sc:
+            map_vs_sow = 'NO_SOW'; map_mismatch = ''
+        elif map_erb is None and map_irt is None and map_ifl is None:
+            map_vs_sow = 'NO_MAP_COUNTS'; map_mismatch = ''
+        else:
+            issues = []
+            if map_erb is not None and map_erb != sc['ERB']:
+                issues.append(f'ERB: Map={map_erb} SOW={sc["ERB"]}')
+            if map_irt is not None and map_irt != sc['IRT']:
+                issues.append(f'IRT: Map={map_irt} SOW={sc["IRT"]}')
+            if map_ifl is not None and map_ifl != sc['IFL']:
+                issues.append(f'IFL: Map={map_ifl} SOW={sc["IFL"]}')
+            map_vs_sow = 'MISMATCH' if issues else 'MATCH'
+            map_mismatch = ' | '.join(issues)
 
     # ── COMPLIANCE % ─────────────────────────────────────────────────
     checks = {
         'PC_License_Branch': pc_branch, 'PC_License_Tech': pc_tech,
-        'client_a_Cert': client_a_cert,        'IPM_Cert': ipm_cert,
+        'Client_Cert': client_cert,        'IPM_Cert': ipm_cert,
         'COI': coi,                      'Annual_Report': annual,
         'Quarterly_Trend': trend,        'Pesticide_Log': pest_log,
     }
@@ -760,7 +1057,10 @@ for addr, docs in docs_by_addr.items():
 
     # build flags string
     flag_issues = [f'{k}: {v}' for k,v in checks.items() if v in ('MISSING','EXPIRED','WRONG_YEAR','MANUAL_REVIEW')]
-    if equip == 'MISMATCH': flag_issues.append('EQUIPMENT COUNT MISMATCH')
+    if equip not in ('PASS', 'CANCELLED', 'NO_DATA', ''):
+        flag_issues.append(f'EQUIPMENT: {equip}')
+    if map_vs_sow == 'MISMATCH':
+        flag_issues.append(f'MAP MISMATCH: {map_mismatch}')
     flag_issues.extend(doc_flags)
     flags_str = ' | '.join(flag_issues) if flag_issues else 'NONE'
 
@@ -775,59 +1075,188 @@ for addr, docs in docs_by_addr.items():
         'tech_name':         tech_name,
         'PC_license_branch': pc_branch,
         'PC_license_tech':   pc_tech,
-        'client_a_cert':        client_a_cert,
+        'client_cert':        client_cert,
         'IPM_cert':          ipm_cert,
         'COI':               coi,
         'annual_report':     annual,
         'quarterly_trend':   trend,
         'pesticide_log':     pest_log,
         'equipment_match':   equip,
-        # ── map evaluation ──────────────────────────────────────────
-        **{k: (v if not isinstance(v, list) else ' | '.join(v) if v else '')
-           for k, v in evaluate_map(
-               addr,
-               sow_erb=sow_counts.get(addr, {}).get('ERB'),
-               sow_irt=sow_counts.get(addr, {}).get('IRT'),
-               sow_ifl=sow_counts.get(addr, {}).get('IFL'),
-           ).items()},
-        'checks_applicable': checks_app,
-        'checks_passed':     checks_pass,
-        'compliance_pct':    f'{pct}%',
+        'map_found':         map_found_val,
+        'map_erb':           map_erb if map_erb is not None else '',
+        'map_irt':           map_irt if map_irt is not None else '',
+        'map_ifl':           map_ifl if map_ifl is not None else '',
+        'map_dated':         map_dated_val,
+        'map_signed':        map_signed_val,
+        'map_vs_sow':        map_vs_sow,
+        'map_mismatch_detail': map_mismatch,
         'flags':             flags_str,
         'last_checked':      datetime.today().strftime('%m/%d/%Y'),
     })
-    print(f"  ✓ {original_addr}  {pct}%  tech=[{tech_name}]  branch_lic={pc_branch}  tech_lic={pc_tech}  client_a={client_a_cert}  ipm={ipm_cert}  coi={coi}  annual={annual}  trend={trend}  log={pest_log}")
+    print(f"  ✓ {original_addr}  {pct}%  tech=[{tech_name}]  branch_lic={pc_branch}  tech_lic={pc_tech}  client={client_cert}  ipm={ipm_cert}  coi={coi}  annual={annual}  trend={trend}  log={pest_log}")
 
 # ─────────────────────────────────────────────────────────────────────
 # WRITE TO COMPLIANCE_EVAL
 # ─────────────────────────────────────────────────────────────────────
 HEADERS = [
     'audit_month','address','branch','state','company','tech_name',
-    'PC_license_branch','PC_license_tech','client_a_cert','IPM_cert',
+    'PC_license_branch','PC_license_tech','client_cert','IPM_cert',
     'COI','annual_report','quarterly_trend','pesticide_log',
-    'equipment_match','map_found','map_file','map_page_count',
-    'map_erb','map_irt','map_ifl','map_signed','map_dated','map_status',
-    'map_flags','checks_applicable','checks_passed','compliance_pct',
+    'equipment_match',
+    'map_found','map_erb','map_irt','map_ifl',
+    'map_dated','map_signed','map_vs_sow','map_mismatch_detail',
     'flags','last_checked'
 ]
 
 print(f"\nWriting {len(results)} rows to Compliance_Eval...")
 ws_eval = wb['Compliance_Eval']
 
-# clear old data (keep row 1 for headers)
-for row in ws_eval.iter_rows(min_row=2):
-    for cell in row:
-        cell.value = None
+# Always sync the header row to the current HEADERS list. Old data rows below
+# stay put. If the previous header set was different, OLD ROWS' columns past
+# the changed point may be misaligned vs. the new headers — delete pre-rewire
+# rows if you want a clean Power BI view.
+existing_headers = [ws_eval.cell(row=1, column=c).value for c in range(1, len(HEADERS) + 1)]
+if existing_headers != HEADERS:
+    if any(existing_headers):
+        print("  ⚠ Header row changed — old data rows may be misaligned in the new columns.")
+        print("    Recommended: delete pre-rewire rows once Power BI is wired up.")
+    for col, h in enumerate(HEADERS, 1):
+        ws_eval.cell(row=1, column=col, value=h)
 
-# write headers row 1
-for col, h in enumerate(HEADERS, 1):
-    ws_eval.cell(row=1, column=col, value=h)
+# Build index of existing rows keyed by (address, audit_month) -> row number
+existing_index = {}
+for row_idx in range(2, ws_eval.max_row + 1):
+    ex_addr  = ws_eval.cell(row=row_idx, column=HEADERS.index('address') + 1).value
+    ex_month = ws_eval.cell(row=row_idx, column=HEADERS.index('audit_month') + 1).value
+    if ex_addr and ex_month:
+        existing_index[(str(ex_addr).strip(), str(ex_month).strip())] = row_idx
 
-# write data rows
-for row_idx, result in enumerate(results, 2):
-    for col_idx, key in enumerate(HEADERS, 1):
-        ws_eval.cell(row=row_idx, column=col_idx, value=result.get(key, ''))
+# Overwrite matching rows; append new ones
+overwritten = 0
+appended = 0
+next_row = ws_eval.max_row + 1 if ws_eval.max_row > 1 else 2
+
+for result in results:
+    key = (str(result.get('address', '')).strip(), str(result.get('audit_month', '')).strip())
+    if key in existing_index:
+        row_idx = existing_index[key]
+        overwritten += 1
+    else:
+        row_idx = next_row
+        next_row += 1
+        appended += 1
+    for col_idx, h in enumerate(HEADERS, 1):
+        ws_eval.cell(row=row_idx, column=col_idx, value=result.get(h, ''))
 
 wb.save(COMPLIANCE_PATH)
-print(f"✓ Saved. {len(results)} locations written to Compliance_Eval.")
+print(f"✓ Saved. {overwritten} rows overwritten, {appended} new rows appended to Compliance_Eval.")
+
+# ─────────────────────────────────────────────────────────────────────
+# WRITE / UPDATE Map_Manual_Data TAB
+# Only writes address and map_found — never overwrites user-filled data
+# ─────────────────────────────────────────────────────────────────────
+MAP_MANUAL_HEADERS = [
+    'address','map_found','map_erb','map_irt','map_ifl',
+    'map_dated','map_signed','map_status','last_verified','map_flags'
+]
+MAP_AUTO_COLS = {'address', 'map_found'}  # only these are auto-written
+
+wb2 = openpyxl.load_workbook(COMPLIANCE_PATH)
+if 'Map_Manual_Data' not in wb2.sheetnames:
+    ws_map = wb2.create_sheet('Map_Manual_Data')
+    for col, h in enumerate(MAP_MANUAL_HEADERS, 1):
+        ws_map.cell(row=1, column=col, value=h)
+    print("  ✓ Map_Manual_Data tab created")
+else:
+    ws_map = wb2['Map_Manual_Data']
+
+# Build index of existing addresses in Map_Manual_Data
+existing_rows = {}
+for i, row in enumerate(ws_map.iter_rows(min_row=2, values_only=False), 2):
+    addr_cell = row[0].value
+    if addr_cell:
+        existing_rows[norm_addr(str(addr_cell))] = i
+
+for result in results:
+    addr_norm = norm_addr(str(result.get('address','')))
+    map_found_val = result.get('map_found', 'MISSING')
+    if addr_norm in existing_rows:
+        # Update map_found only (col B = index 2)
+        row_idx = existing_rows[addr_norm]
+        ws_map.cell(row=row_idx, column=2, value=map_found_val)
+    else:
+        # New address — add row with address + map_found, leave rest blank
+        next_row = ws_map.max_row + 1
+        ws_map.cell(row=next_row, column=1, value=result.get('address',''))
+        ws_map.cell(row=next_row, column=2, value=map_found_val)
+
+wb2.save(COMPLIANCE_PATH)
+print(f"✓ Map_Manual_Data updated — {len(results)} addresses")
 print("\nDone!")
+
+# ─────────────────────────────────────────────────────────────────────
+# FILL Doc_Compliance.Technician IN THE SERVICE TICKET WORKBOOK
+#
+# JOIN KEY: (normalized_address, month_word)
+#   audit_month "July 2026" -> month_word "July"
+# Only touches rows where the target tab's Month column == month_word,
+# so a July run never disturbs a June row and vice versa.
+#
+# Rules:
+#   - Only fills BLANK Technician cells by default (protects manual typing).
+#   - Only writes when Compliance_Eval actually has a tech for that row.
+#   - Flip OVERWRITE_EXISTING_TECH to True if you ever want to force-refresh.
+# ─────────────────────────────────────────────────────────────────────
+DOC_TAB                 = 'Doc_Compliance_June'   # yes, misnamed — it holds both months
+OVERWRITE_EXISTING_TECH = False
+
+month_word = AUDIT_MONTH.split()[0]  # "July 2026" -> "July"
+
+# 1) Build the lookup dictionary from THIS run's results.
+#    Key: (normalized_address, month_word)   Value: tech name
+addr_month_to_tech = {}
+for r in results:
+    if r.get('tech_name'):
+        addr_month_to_tech[(norm_addr(r['address']), month_word)] = r['tech_name']
+
+print(f"\nFilling Technician column in '{DOC_TAB}' for month '{month_word}'...")
+wb_st = openpyxl.load_workbook(SERVICE_TICKET_PATH)
+
+if DOC_TAB not in wb_st.sheetnames:
+    print(f"  ⚠ Tab '{DOC_TAB}' not found in {SERVICE_TICKET_PATH}. Skipping.")
+else:
+    ws_doc = wb_st[DOC_TAB]
+
+    # 2) Find columns by header name (survives reordering).
+    header_row = next(ws_doc.iter_rows(min_row=1, max_row=1, values_only=False))
+    header_map = {str(c.value).strip().lower(): c.column for c in header_row if c.value}
+    addr_col  = header_map.get('address')
+    month_col = header_map.get('month')
+    tech_col  = header_map.get('technician')
+
+    if not all([addr_col, month_col, tech_col]):
+        print(f"  ⚠ '{DOC_TAB}' missing Address, Month, or Technician header. Skipping.")
+    else:
+        filled = already = no_match = other_month = 0
+        for row_idx in range(2, ws_doc.max_row + 1):
+            addr_val  = ws_doc.cell(row=row_idx, column=addr_col).value
+            row_month = ws_doc.cell(row=row_idx, column=month_col).value
+            if not addr_val or not row_month:
+                continue
+            if str(row_month).strip() != month_word:
+                other_month += 1        # e.g. a June row during a July run
+                continue
+            src_tech = addr_month_to_tech.get((norm_addr(str(addr_val)), month_word))
+            if not src_tech:
+                no_match += 1
+                continue
+            current = ws_doc.cell(row=row_idx, column=tech_col).value
+            if current and str(current).strip() and not OVERWRITE_EXISTING_TECH:
+                already += 1
+                continue
+            ws_doc.cell(row=row_idx, column=tech_col, value=src_tech)
+            filled += 1
+
+        wb_st.save(SERVICE_TICKET_PATH)
+        print(f"  ✓ Filled {filled}  |  already had tech: {already}  "
+              f"|  no source match: {no_match}  |  other-month rows left alone: {other_month}")
